@@ -1,0 +1,111 @@
+name: Import source and build APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.source/**'
+      - '.github/workflows/import-build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify uploaded source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .source/lark.part.* > /tmp/lark-player.b64
+          base64 --decode /tmp/lark-player.b64 > /tmp/lark-player.zip
+          echo 'aed45c7bfa48e9d94fea6d3af81d1050637b6d7cc0adb86677ee503f62183429  /tmp/lark-player.zip' | sha256sum -c -
+          rm -rf /tmp/lark-src
+          mkdir -p /tmp/lark-src
+          unzip -q /tmp/lark-player.zip -d /tmp/lark-src
+          test -f /tmp/lark-src/lark-player-clone/package.json
+          rsync -a /tmp/lark-src/lark-player-clone/ ./
+
+      - name: Apply Android build compatibility fixes
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.dependencies = pkg.dependencies || {};
+          delete pkg.dependencies['react-native-track-player'];
+          delete pkg.dependencies['node-vibrant'];
+          delete pkg.dependencies['@react-navigation/bottom-tabs'];
+          pkg.dependencies['@expo/vector-icons'] = '^14.0.2';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+          const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+          app.expo.name = 'Lark Media Player';
+          app.expo.slug = 'lark-media-player';
+          app.expo.android = app.expo.android || {};
+          app.expo.android.package = 'com.mazharmnzoor.larkmediaplayer';
+          app.expo.android.versionCode = app.expo.android.versionCode || 1;
+          fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
+          NODE
+          rm -rf .source
+
+      - name: Commit imported project to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+          else
+            git commit -m 'Import Lark Media Player source [skip ci]'
+            git push origin HEAD:main
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install JavaScript dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Generate Android native project
+        env:
+          CI: '1'
+        run: npx expo prebuild --platform android --clean
+
+      - name: Build installable debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cd ..
+          cp android/app/build/outputs/apk/debug/app-debug.apk Lark-Media-Player.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lark-Media-Player-APK
+          path: Lark-Media-Player.apk
+          if-no-files-found: error
+          retention-days: 30
