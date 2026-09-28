@@ -2,9 +2,10 @@
   "expo": {
     "name": "Lark Media Player",
     "slug": "lark-media-player",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0B0F",
     "splash": {
       "backgroundColor": "#0B0B0F"
     },
@@ -13,9 +14,9 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yourcompany.larkplayerclone",
+      "bundleIdentifier": "com.mazharmnzoor.larkmediaplayer",
       "infoPlist": {
-        "NSAppleMusicUsageDescription": "Allow access to your music library so the app can play your local songs.",
+        "NSAppleMusicUsageDescription": "Allow access to your music library so Lark can play your local songs.",
         "UIBackgroundModes": [
           "audio"
         ]
@@ -29,7 +30,8 @@
         "FOREGROUND_SERVICE",
         "WAKE_LOCK"
       ],
-      "versionCode": 1
+      "versionCode": 2,
+      "softwareKeyboardLayoutMode": "resize"
     },
     "plugins": [
       [
@@ -37,7 +39,7 @@
         {
           "photosPermission": "Allow $(PRODUCT_NAME) to access your media library.",
           "savePhotosPermission": "Allow $(PRODUCT_NAME) to save media.",
-          "isAccessMediaLocationEnabled": true
+          "isAccessMediaLocationEnabled": false
         }
       ],
       "expo-av"
