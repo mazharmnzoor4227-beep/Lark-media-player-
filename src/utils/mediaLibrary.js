@@ -1,26 +1,22 @@
-// src/utils/mediaLibrary.js
-// Wraps expo-media-library so the rest of the app never talks to it directly.
-// Keeping this isolated means swapping the scanning strategy later only
-// touches this one file.
-
 import * as MediaLibrary from 'expo-media-library';
 
+const AUDIO_MEDIA_TYPE = MediaLibrary.MediaType?.audio || MediaLibrary.MediaType?.AUDIO || 'audio';
+const CREATION_TIME = MediaLibrary.SortBy?.creationTime || MediaLibrary.SortBy?.CREATION_TIME || 'creationTime';
+
 export async function requestAudioPermission() {
-  const { status, canAskAgain } = await MediaLibrary.requestPermissionsAsync();
-  return { granted: status === 'granted', canAskAgain };
+  const response = await MediaLibrary.requestPermissionsAsync(false, ['audio']);
+  return { granted: Boolean(response.granted), canAskAgain: response.canAskAgain !== false };
 }
 
-/**
- * Paginates through the device's audio library and returns a flat,
- * normalized array of track objects. Expo returns pages of up to 100
- * items at a time, so we walk `endCursor` until `hasNextPage` is false.
- */
 export async function fetchAllTracks(onProgress) {
+  const available = await MediaLibrary.isAvailableAsync();
+  if (!available) throw new Error('Media library is not available on this device.');
+
   const tracks = [];
   let page = await MediaLibrary.getAssetsAsync({
-    mediaType: MediaLibrary.MediaType.audio,
+    mediaType: AUDIO_MEDIA_TYPE,
     first: 200,
-    sortBy: [MediaLibrary.SortBy.creationTime],
+    sortBy: [CREATION_TIME],
   });
 
   tracks.push(...normalize(page.assets));
@@ -28,73 +24,72 @@ export async function fetchAllTracks(onProgress) {
 
   while (page.hasNextPage) {
     page = await MediaLibrary.getAssetsAsync({
-      mediaType: MediaLibrary.MediaType.audio,
+      mediaType: AUDIO_MEDIA_TYPE,
       first: 200,
       after: page.endCursor,
-      sortBy: [MediaLibrary.SortBy.creationTime],
+      sortBy: [CREATION_TIME],
     });
     tracks.push(...normalize(page.assets));
     onProgress?.(tracks.length);
   }
 
-  return tracks;
+  return tracks.sort((a, b) => a.title.localeCompare(b.title));
 }
 
-function normalize(assets) {
-  return assets.map((asset) => {
-    // MediaLibrary doesn't reliably expose ID3 tags cross-platform, so we
-    // derive a friendly title/artist split from the filename as a fallback.
-    const { title, artist } = splitFilename(asset.filename);
-    return {
-      id: asset.id,
-      uri: asset.uri,
-      duration: asset.duration || 0,
-      filename: asset.filename,
-      title,
-      artist,
-      album: 'Unknown Album',
-      artwork: null, // populated lazily via getArtworkAsync when needed
-      modificationTime: asset.modificationTime,
-    };
-  });
+function normalize(assets = []) {
+  return assets
+    .filter((asset) => asset?.uri && asset?.id)
+    .map((asset) => {
+      const { title, artist } = splitFilename(asset.filename);
+      return {
+        id: String(asset.id),
+        uri: asset.uri,
+        duration: Number(asset.duration) || 0,
+        filename: asset.filename || 'Unknown Track',
+        title,
+        artist,
+        album: 'Unknown Album',
+        artwork: null,
+        modificationTime: asset.modificationTime || 0,
+      };
+    });
 }
 
 function splitFilename(filename = 'Unknown Track') {
-  const withoutExt = filename.replace(/\.[^/.]+$/, '');
+  const withoutExt = String(filename).replace(/\.[^/.]+$/, '').trim() || 'Unknown Track';
   const parts = withoutExt.split(' - ');
   if (parts.length >= 2) {
-    return { artist: parts[0].trim(), title: parts.slice(1).join(' - ').trim() };
+    return { artist: parts[0].trim() || 'Unknown Artist', title: parts.slice(1).join(' - ').trim() || withoutExt };
   }
   return { artist: 'Unknown Artist', title: withoutExt };
 }
 
-export function groupByArtist(tracks) {
+export function groupByArtist(tracks = []) {
   const map = new Map();
-  for (const t of tracks) {
-    const key = t.artist || 'Unknown Artist';
+  for (const track of tracks) {
+    const key = track.artist || 'Unknown Artist';
     if (!map.has(key)) map.set(key, []);
-    map.get(key).push(t);
+    map.get(key).push(track);
   }
   return Array.from(map.entries()).map(([artist, songs]) => ({ artist, songs }));
 }
 
-export function groupByAlbum(tracks) {
+export function groupByAlbum(tracks = []) {
   const map = new Map();
-  for (const t of tracks) {
-    const key = t.album || 'Unknown Album';
+  for (const track of tracks) {
+    const key = track.album || 'Unknown Album';
     if (!map.has(key)) map.set(key, []);
-    map.get(key).push(t);
+    map.get(key).push(track);
   }
   return Array.from(map.entries()).map(([album, songs]) => ({ album, songs }));
 }
 
-export function searchTracks(tracks, query) {
+export function searchTracks(tracks = [], query) {
   if (!query?.trim()) return tracks;
   const q = query.trim().toLowerCase();
-  return tracks.filter(
-    (t) =>
-      t.title.toLowerCase().includes(q) ||
-      t.artist.toLowerCase().includes(q) ||
-      t.album.toLowerCase().includes(q)
+  return tracks.filter((track) =>
+    [track.title, track.artist, track.album]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(q))
   );
 }
