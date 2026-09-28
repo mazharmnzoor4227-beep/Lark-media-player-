@@ -1,7 +1,3 @@
-// src/context/PlayerContext.js
-// Single source of truth for playback. Wrap the app in <PlayerProvider> once
-// (see App.js) and any screen can call usePlayer() to read/control state.
-
 import React, {
   createContext,
   useCallback,
@@ -11,210 +7,253 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 
 const PlayerContext = createContext(null);
-
 const REPEAT_MODES = ['off', 'all', 'one'];
 
 export function PlayerProvider({ children }) {
   const soundRef = useRef(null);
-  const [queue, setQueue] = useState([]); // playback order (post-shuffle)
-  const [originalQueue, setOriginalQueue] = useState([]); // library order
-  const [currentIndex, setCurrentIndex] = useState(-1);
+  const queueRef = useRef([]);
+  const indexRef = useRef(-1);
+  const repeatRef = useRef('off');
+  const loadingTokenRef = useRef(0);
+
+  const [queue, setQueueState] = useState([]);
+  const [originalQueue, setOriginalQueue] = useState([]);
+  const [currentIndex, setCurrentIndexState] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [positionMillis, setPositionMillis] = useState(0);
   const [durationMillis, setDurationMillis] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [playbackError, setPlaybackError] = useState(null);
   const [shuffle, setShuffle] = useState(false);
-  const [repeatMode, setRepeatMode] = useState('off'); // off | all | one
+  const [repeatMode, setRepeatModeState] = useState('off');
+
+  const setQueue = useCallback((next) => {
+    queueRef.current = next;
+    setQueueState(next);
+  }, []);
+
+  const setCurrentIndex = useCallback((next) => {
+    indexRef.current = next;
+    setCurrentIndexState(next);
+  }, []);
+
+  const setRepeatMode = useCallback((next) => {
+    repeatRef.current = next;
+    setRepeatModeState(next);
+  }, []);
 
   const currentTrack = currentIndex >= 0 ? queue[currentIndex] : null;
 
-  // Configure audio session once: play in background, respect silent switch off.
   useEffect(() => {
     Audio.setAudioModeAsync({
       staysActiveInBackground: true,
       playsInSilentModeIOS: true,
       shouldDuckAndroid: true,
-      interruptionModeIOS: 1, // DoNotMix
-      interruptionModeAndroid: 1,
-    }).catch(() => {});
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      playThroughEarpieceAndroid: false,
+    }).catch((error) => console.warn('Audio mode setup failed', error));
 
     return () => {
+      loadingTokenRef.current += 1;
       soundRef.current?.unloadAsync().catch(() => {});
+      soundRef.current = null;
     };
   }, []);
 
-  const onPlaybackStatusUpdate = useCallback(
-    (status) => {
-      if (!status.isLoaded) {
-        setIsBuffering(true);
-        return;
-      }
-      setIsBuffering(status.isBuffering);
-      setIsPlaying(status.isPlaying);
-      setPositionMillis(status.positionMillis || 0);
-      setDurationMillis(status.durationMillis || 0);
+  const loadAndPlay = useCallback(async (index, list = queueRef.current) => {
+    if (!Array.isArray(list) || index < 0 || index >= list.length) return;
 
-      if (status.didJustFinish && !status.isLooping) {
-        handleTrackFinished();
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentIndex, queue, repeatMode]
-  );
-
-  async function loadAndPlay(index, list = queue) {
-    if (index < 0 || index >= list.length) return;
+    const token = ++loadingTokenRef.current;
     const track = list[index];
+    setPlaybackError(null);
+    setIsBuffering(true);
+    setPositionMillis(0);
+    setDurationMillis(0);
 
     try {
       if (soundRef.current) {
-        await soundRef.current.unloadAsync();
+        const previous = soundRef.current;
         soundRef.current = null;
+        await previous.unloadAsync().catch(() => {});
       }
-      setIsBuffering(true);
+
       const { sound } = await Audio.Sound.createAsync(
         { uri: track.uri },
         {
           shouldPlay: true,
-          isLooping: repeatMode === 'one',
+          isLooping: repeatRef.current === 'one',
           progressUpdateIntervalMillis: 250,
-        },
-        onPlaybackStatusUpdate
+        }
       );
+
+      if (token !== loadingTokenRef.current) {
+        await sound.unloadAsync().catch(() => {});
+        return;
+      }
+
       soundRef.current = sound;
       setCurrentIndex(index);
-    } catch (err) {
-      console.warn('Playback failed to load track', track?.title, err);
-      setIsBuffering(false);
-    }
-  }
 
-  function handleTrackFinished() {
-    if (repeatMode === 'one') {
-      soundRef.current?.replayAsync();
-      return;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (token !== loadingTokenRef.current) return;
+        if (!status.isLoaded) {
+          if (status.error) setPlaybackError(status.error);
+          setIsBuffering(false);
+          return;
+        }
+
+        setIsBuffering(Boolean(status.isBuffering));
+        setIsPlaying(Boolean(status.isPlaying));
+        setPositionMillis(status.positionMillis || 0);
+        setDurationMillis(status.durationMillis || 0);
+
+        if (status.didJustFinish && !status.isLooping) {
+          const activeQueue = queueRef.current;
+          const activeIndex = indexRef.current;
+          const repeat = repeatRef.current;
+          const isLast = activeIndex >= activeQueue.length - 1;
+
+          if (isLast && repeat === 'off') {
+            setIsPlaying(false);
+            return;
+          }
+
+          const nextIndex = isLast ? 0 : activeIndex + 1;
+          loadAndPlay(nextIndex, activeQueue);
+        }
+      });
+    } catch (error) {
+      if (token === loadingTokenRef.current) {
+        setPlaybackError(error?.message || 'Unable to play this track');
+        setIsPlaying(false);
+        setIsBuffering(false);
+      }
+      console.warn('Playback failed to load track', track?.title, error);
     }
-    const isLast = currentIndex === queue.length - 1;
-    if (isLast && repeatMode === 'off') {
-      setIsPlaying(false);
-      return;
-    }
-    const nextIndex = isLast ? 0 : currentIndex + 1;
-    loadAndPlay(nextIndex);
-  }
+  }, [setCurrentIndex]);
 
   const playQueue = useCallback(async (tracks, startIndex = 0) => {
-    setOriginalQueue(tracks);
-    setQueue(tracks);
-    await loadAndPlay(startIndex, tracks);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const safeTracks = Array.isArray(tracks) ? tracks : [];
+    if (!safeTracks.length) return;
+    setOriginalQueue(safeTracks);
+    setQueue(safeTracks);
+    await loadAndPlay(Math.max(0, Math.min(startIndex, safeTracks.length - 1)), safeTracks);
+  }, [loadAndPlay, setQueue]);
 
   const togglePlayPause = useCallback(async () => {
-    if (!soundRef.current) return;
-    if (isPlaying) {
-      await soundRef.current.pauseAsync();
-    } else {
-      await soundRef.current.playAsync();
+    const sound = soundRef.current;
+    if (!sound) return;
+    try {
+      const status = await sound.getStatusAsync();
+      if (!status.isLoaded) return;
+      if (status.isPlaying) await sound.pauseAsync();
+      else await sound.playAsync();
+    } catch (error) {
+      setPlaybackError(error?.message || 'Playback control failed');
     }
-  }, [isPlaying]);
+  }, []);
 
   const playNext = useCallback(() => {
-    if (queue.length === 0) return;
-    const isLast = currentIndex === queue.length - 1;
-    const nextIndex = isLast ? 0 : currentIndex + 1;
-    loadAndPlay(nextIndex);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIndex, queue]);
+    const activeQueue = queueRef.current;
+    if (!activeQueue.length) return;
+    const activeIndex = indexRef.current < 0 ? 0 : indexRef.current;
+    const nextIndex = activeIndex >= activeQueue.length - 1 ? 0 : activeIndex + 1;
+    loadAndPlay(nextIndex, activeQueue);
+  }, [loadAndPlay]);
 
   const playPrevious = useCallback(() => {
-    if (queue.length === 0) return;
-    // If we're more than 3s into the track, restart it instead of skipping back
-    // — matches standard iOS player behavior.
-    if (positionMillis > 3000) {
-      soundRef.current?.setPositionAsync(0);
+    const activeQueue = queueRef.current;
+    if (!activeQueue.length) return;
+
+    if (positionMillis > 3000 && soundRef.current) {
+      soundRef.current.setPositionAsync(0).catch(() => {});
       return;
     }
-    const isFirst = currentIndex === 0;
-    const prevIndex = isFirst ? queue.length - 1 : currentIndex - 1;
-    loadAndPlay(prevIndex);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIndex, queue, positionMillis]);
+
+    const activeIndex = indexRef.current < 0 ? 0 : indexRef.current;
+    const previousIndex = activeIndex <= 0 ? activeQueue.length - 1 : activeIndex - 1;
+    loadAndPlay(previousIndex, activeQueue);
+  }, [loadAndPlay, positionMillis]);
 
   const seekTo = useCallback(async (millis) => {
-    await soundRef.current?.setPositionAsync(millis);
-  }, []);
+    const sound = soundRef.current;
+    if (!sound) return;
+    const target = Math.max(0, Math.min(Number(millis) || 0, durationMillis || Infinity));
+    await sound.setPositionAsync(target).catch((error) => {
+      setPlaybackError(error?.message || 'Seeking failed');
+    });
+  }, [durationMillis]);
 
   const toggleShuffle = useCallback(() => {
-    setShuffle((prev) => {
-      const next = !prev;
-      if (next) {
-        const current = queue[currentIndex];
-        const rest = queue.filter((_, i) => i !== currentIndex);
-        const shuffled = shuffleArray(rest);
-        const newQueue = current ? [current, ...shuffled] : shuffled;
-        setQueue(newQueue);
-        setCurrentIndex(current ? 0 : -1);
+    const activeQueue = queueRef.current;
+    const activeIndex = indexRef.current;
+    const activeTrack = activeQueue[activeIndex];
+
+    setShuffle((wasShuffled) => {
+      const nextShuffle = !wasShuffled;
+      if (nextShuffle) {
+        const remaining = activeQueue.filter((_, index) => index !== activeIndex);
+        const nextQueue = activeTrack ? [activeTrack, ...shuffleArray(remaining)] : shuffleArray(remaining);
+        setQueue(nextQueue);
+        setCurrentIndex(activeTrack ? 0 : -1);
       } else {
-        const current = queue[currentIndex];
-        setQueue(originalQueue);
-        const idx = originalQueue.findIndex((t) => t.id === current?.id);
-        setCurrentIndex(idx >= 0 ? idx : 0);
+        const nextQueue = originalQueue;
+        const restoredIndex = nextQueue.findIndex((track) => track.id === activeTrack?.id);
+        setQueue(nextQueue);
+        setCurrentIndex(restoredIndex >= 0 ? restoredIndex : nextQueue.length ? 0 : -1);
       }
-      return next;
+      return nextShuffle;
     });
-  }, [queue, currentIndex, originalQueue]);
+  }, [originalQueue, setCurrentIndex, setQueue]);
 
   const cycleRepeatMode = useCallback(() => {
-    setRepeatMode((prev) => {
-      const idx = REPEAT_MODES.indexOf(prev);
-      const next = REPEAT_MODES[(idx + 1) % REPEAT_MODES.length];
-      soundRef.current?.setIsLoopingAsync(next === 'one');
-      return next;
-    });
-  }, []);
+    const current = repeatRef.current;
+    const next = REPEAT_MODES[(REPEAT_MODES.indexOf(current) + 1) % REPEAT_MODES.length];
+    setRepeatMode(next);
+    soundRef.current?.setIsLoopingAsync(next === 'one').catch(() => {});
+  }, [setRepeatMode]);
 
-  const value = useMemo(
-    () => ({
-      queue,
-      currentTrack,
-      currentIndex,
-      isPlaying,
-      isBuffering,
-      positionMillis,
-      durationMillis,
-      shuffle,
-      repeatMode,
-      playQueue,
-      togglePlayPause,
-      playNext,
-      playPrevious,
-      seekTo,
-      toggleShuffle,
-      cycleRepeatMode,
-    }),
-    [
-      queue,
-      currentTrack,
-      currentIndex,
-      isPlaying,
-      isBuffering,
-      positionMillis,
-      durationMillis,
-      shuffle,
-      repeatMode,
-      playQueue,
-      togglePlayPause,
-      playNext,
-      playPrevious,
-      seekTo,
-      toggleShuffle,
-      cycleRepeatMode,
-    ]
-  );
+  const value = useMemo(() => ({
+    queue,
+    currentTrack,
+    currentIndex,
+    isPlaying,
+    isBuffering,
+    playbackError,
+    positionMillis,
+    durationMillis,
+    shuffle,
+    repeatMode,
+    playQueue,
+    togglePlayPause,
+    playNext,
+    playPrevious,
+    seekTo,
+    toggleShuffle,
+    cycleRepeatMode,
+  }), [
+    queue,
+    currentTrack,
+    currentIndex,
+    isPlaying,
+    isBuffering,
+    playbackError,
+    positionMillis,
+    durationMillis,
+    shuffle,
+    repeatMode,
+    playQueue,
+    togglePlayPause,
+    playNext,
+    playPrevious,
+    seekTo,
+    toggleShuffle,
+    cycleRepeatMode,
+  ]);
 
   return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
 }
@@ -227,7 +266,7 @@ export function usePlayer() {
 
 function shuffleArray(arr) {
   const copy = [...arr];
-  for (let i = copy.length - 1; i > 0; i--) {
+  for (let i = copy.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
