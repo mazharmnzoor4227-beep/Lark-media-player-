@@ -1,0 +1,34 @@
+name: Runtime smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify standalone release build configuration
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const workflow = fs.readFileSync('.github/workflows/import-build-apk.yml','utf8');
+          if (!workflow.includes('assembleRelease')) {
+            throw new Error('Standalone APK must use assembleRelease so the JS bundle is embedded');
+          }
+          if (workflow.includes('assembleDebug')) {
+            throw new Error('Debug APK still configured; it depends on Metro at runtime');
+          }
+          NODE
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Export Android JS bundle
+        env:
+          CI: '1'
+        run: npx expo export --platform android --output-dir dist-smoke
